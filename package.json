@@ -10,7 +10,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "start": "node dist/server.js"
   },
-  "name": "uno-server",
+  "name": "wills-uno-BE",
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",
