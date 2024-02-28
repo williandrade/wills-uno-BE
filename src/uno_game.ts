@@ -1,7 +1,9 @@
 import winston from "winston";
+import crypto from 'crypto';
 import {Color, Type, UnoCard, Value} from "./dto/card";
 import {UnoRoom} from "./dto/room";
 import {Socket} from "socket.io/dist/socket";
+import _ from "lodash";
 
 const logger = winston.createLogger({
     level: 'debug',
@@ -32,22 +34,8 @@ if (process.env.NODE_ENV !== 'production') {
 class UnoGame {
     private static instance: UnoGame;
 
-    private _room: UnoRoom = {
-        roomId: 'SINGLE ROOM',
-        players: [],
-        gameState: {
-            deck: [],
-            discardPile: [],
-            currentPlayerId: null,
-            direction: {value: 1},
-            winnerId: null,
-            isOver: false,
-            isStarted: false,
-            isPaused: false,
-            isUnoCall: false
-        },
-        maxPlayers: 10
-    };
+    // private _rooms: UnoRoom[] = [];
+    private _room: UnoRoom = UnoGame._getRoom(undefined);
 
     private constructor() {
     }
@@ -107,13 +95,18 @@ class UnoGame {
     }
 
     playCard = (message: any, socket: Socket, server: any, data: any) => {
+        if (!this._isCurrentPlayerPlaying(socket.id)) {
+            return;
+        }
+
+        const card = message.card as UnoCard;
+
         if (!this._room.gameState.currentPlayerId) {
             logger.error(`[${socket.id}] No Current player`);
             socket.emit('error', 'No Current player');
         }
 
-        this._room.gameState.discardPile.push(message.card);
-        let currentPlayer = this._room.players.find(p => p.id = this._room.gameState.currentPlayerId!);
+        let currentPlayer = this._room.players.find(p => p.id === this._room.gameState.currentPlayerId!);
         logger.debug(`Current player is `, {currentPlayer});
 
         if (!currentPlayer) {
@@ -121,7 +114,7 @@ class UnoGame {
             socket.emit('error', 'No Current player');
         }
 
-        if (currentPlayer!.hand.find(c => c === message.card) === undefined) {
+        if (currentPlayer!.hand.find(c => _.isEqual(c, card)) === undefined) {
             logger.error(`[${socket.id}] Trying to play a card that is not in the hand.`);
             socket.emit('error', 'This is not a valid card to the current user');
             return;
@@ -139,56 +132,67 @@ class UnoGame {
             return;
         }
 
-        currentPlayer!.hand = currentPlayer!.hand.filter(c => c !== message.card);
-        currentPlayer!.isTurn = false;
+        this._room.gameState.discardPile.push(card);
 
-        this._room.players = this._room.players.map(p => p.id == currentPlayer!.id ? currentPlayer! : p);
+        currentPlayer!.hand = currentPlayer!.hand.filter(c => !_.isEqual(c, card));
+        currentPlayer!.isTurn = false;
+        logger.debug(`currentPlayer is [${JSON.stringify(currentPlayer)}]`);
+
+        this._goToNextPlayer();
+        logger.debug(`this._room.players is [${JSON.stringify(this._room.players)}]`);
 
         //TODO: APPLY CARD EFFECTS
 
         this._room.gameState.currentPlayerId = this._room.players[(this._room.players.indexOf(currentPlayer!) + this._room.gameState.direction.value) % this._room.players.length].id;
 
-        server.to(this._room.roomId).emit('cardPlayed', this._room.gameState);
-        server.to(this._room.roomId).emit('playersCountUpdate', this._room.players.map(p => {
-            return {
-                id: p.id,
-                name: p.name,
-                hand: p.hand.length,
-                isHost: p.isHost,
-                isReady: p.isReady,
-                isTurn: p.isTurn,
-                isUno: p.isUno,
-                isSpectator: p.isSpectator
-            };
-        }));
+        server.to(this._room.roomId).emit('gameUpdate', {...this._room.gameState, deck: []});
+        this._informPlayersCount(server);
     }
 
     drawCard = (message: any, socket: Socket, server: any, data: any) => {
-        const card = this._room.gameState.deck.pop();
+        if (!this._isCurrentPlayerPlaying(socket.id)) {
+            return;
+        }
 
-        let currentPlayer = this._room.players.find(p => p.id = this._room.gameState.currentPlayerId!);
+        let currentPlayer = this._room.players.find(p => p.id === this._room.gameState.currentPlayerId!);
+        const count = message.count || 1;
 
-        currentPlayer!.hand.push(card!);
+        logger.debug(`[${socket.id}] Drawing ${count} card(s)`);
+
+        for (let i = 0; i < count; i++) {
+            const card = this._room.gameState.deck.pop()!;
+            currentPlayer!.hand.push(card!);
+        }
+
         if (currentPlayer!.isUno) {
             currentPlayer!.isUno = false;
             this._room.gameState.isUnoCall = false;
         }
-        this._room.players = this._room.players.map(p => p.id == currentPlayer!.id ? currentPlayer! : p);
-        server.to(this._room.roomId).emit('cardDrawn', this._room.gameState);
-        socket.emit('cardDrawn', card);
+
+        //TODO: Add validation in case want to draw until find a valid card to play
+
+        this._goToNextPlayer();
+
+        socket.emit('cardDrawn', currentPlayer!.hand);
+        server.to(this._room.roomId).emit('gameUpdate', {...this._room.gameState, deck: []});
+        this._informPlayersCount(server);
     }
 
     callUno = (message: any, socket: Socket, server: any, data: any) => {
-        this._room.players = this._room.players.map(p => p.id == this._room.gameState.currentPlayerId ? {
+        if (!this._isCurrentPlayerPlaying(socket.id)) {
+            return;
+        }
+
+        this._room.players = this._room.players.map(p => p.id === this._room.gameState.currentPlayerId ? {
             ...p,
             isUno: true
         } : p);
         this._room.gameState.isUnoCall = true;
-        server.to(this._room.roomId).emit('unoCalled', this._room.gameState);
+        server.to(this._room.roomId).emit('unoCalled', {...this._room.gameState, deck: []});
     }
 
     startGame = (message: any, socket: Socket, server: any, data: any) => {
-        const cards = this._shuffleDeck(this._createUnoDeck());
+        let cards = this._shuffleDeck(this._createUnoDeck());
 
         this._room.players.forEach(p => {
             for (let i = 0; i < 7; i++) {
@@ -197,9 +201,12 @@ class UnoGame {
             server.to(p.id)!.emit('cardsOn', p.hand);
         });
 
+        const firstTurnedCard = cards.find(c => c.color !== null && c.value !== Value.Wild && c.value !== Value.WildDrawFour)!;
+        cards = cards.filter(c => !_.isEqual(c, firstTurnedCard));
+
         this._room.gameState = {
             deck: cards,
-            discardPile: [],
+            discardPile: [firstTurnedCard],
             currentPlayerId: this._getRandomPlayer().id,
             direction: {value: 1},
             winnerId: null,
@@ -210,7 +217,8 @@ class UnoGame {
         };
 
 
-        server.to(this._room.roomId).emit('gameStarted', this._room.gameState);
+        server.to(this._room.roomId).emit('gameStarted', {...this._room.gameState, deck: []});
+        this._informPlayersCount(server);
     }
 
     endGame = (message: any, socket: Socket, server: any, data: any) => {
@@ -225,7 +233,7 @@ class UnoGame {
             isPaused: false,
             isUnoCall: false
         };
-        server.to(this._room.roomId).emit('gameEnded', this._room.gameState);
+        server.to(this._room.roomId).emit('gameEnded', {...this._room.gameState, deck: []});
     }
 
     shuffleDeck = (message: any, socket: Socket, server: any, data: any) => {
@@ -284,6 +292,60 @@ class UnoGame {
         const index = Math.floor(Math.random() * this._room.players.length);
         return this._room.players[index];
     }
+
+    private _goToNextPlayer = () => {
+        let currentPlayer = this._room.players.find(p => p.id === this._room.gameState.currentPlayerId!);
+        this._room.players = this._room.players.map(p => p.id === currentPlayer!.id ? currentPlayer! : p);
+    }
+
+    private _informPlayersCount = (server: any) => {
+        server.to(this._room.roomId).emit('playersCountUpdate', this._room.players.map(p => {
+            return {
+                id: p.id,
+                name: p.name,
+                hand: p.hand.length,
+                isHost: p.isHost,
+                isReady: p.isReady,
+                isTurn: p.isTurn,
+                isUno: p.isUno,
+                isSpectator: p.isSpectator
+            };
+        }));
+    }
+
+    private _isCurrentPlayerPlaying = (id: any) => {
+        return this._room.gameState.currentPlayerId == id;
+    }
+
+    private static _getRoom = (roomId: string | undefined) => {
+        // let room = this._rooms.find(r => r.roomId === roomId);
+        let room = undefined;
+
+        if(!room) {
+            room = {
+                roomId: crypto.randomBytes(8).toString('hex'),
+                players: [],
+                gameState: {
+                    deck: [],
+                    discardPile: [],
+                    currentPlayerId: null,
+                    direction: {value: 1},
+                    winnerId: null,
+                    isOver: false,
+                    isStarted: false,
+                    isPaused: false,
+                    isUnoCall: false
+                },
+                maxPlayers: 10
+            };
+
+            // this._rooms.push(room);
+        }
+
+        return room;
+    }
+
+
 }
 
 export {UnoGame};

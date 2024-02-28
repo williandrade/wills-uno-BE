@@ -16,11 +16,11 @@ enum Value {
     Seven = '7',
     Eight = '8',
     Nine = '9',
-    Skip = 'Skip',
-    Reverse = 'Reverse',
-    DrawTwo = 'Draw Two',
-    Wild = 'Wild',
-    WildDrawFour = 'Wild Draw Four',
+    Skip = 'skip',
+    Reverse = 'reverse',
+    DrawTwo = 'drawTwo',
+    Wild = 'wild',
+    WildDrawFour = 'wildDrawFour',
 }
 
 enum Type {

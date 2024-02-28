@@ -4,9 +4,15 @@ import {Server} from 'socket.io';
 import {UnoGame} from "./uno_game";
 import winston from "winston";
 
+const cors = require('cors');
 const app = express();
 const httpServer = createServer(app);
-const io = new Server(httpServer);
+const io = new Server(httpServer, {
+    cors: {
+        origin: "http://localhost:3001",
+        methods: ["GET", "POST"]
+    }
+});
 const unoGame = UnoGame.getInstance();
 
 const logger = winston.createLogger({
@@ -93,7 +99,11 @@ io.on('connection', async (socket) => {
 
             const data = {};
             for (const fn of event.run) {
-                await fn(msg, socket, io, data);
+                try{
+                    await fn(msg, socket, io, data);
+                } catch (e){
+                    logger.error(e);
+                }
             }
         });
     });
