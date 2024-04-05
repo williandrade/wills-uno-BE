@@ -9,7 +9,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
     cors: {
-        origin: "http://localhost:3001",
+        origin: "http://localhost:3002",
         methods: ["GET", "POST"]
     }
 });
@@ -86,6 +86,11 @@ const events = [
         name: 'debugIt',
         description: 'Just for debugging purposes.',
         run: [unoGame.debugIt]
+    },
+    {
+        name: 'fakeGame',
+        description: 'Just for debugging purposes.',
+        run: [unoGame.fakeGame]
     },
 ];
 
