@@ -1,9 +1,10 @@
 import winston from "winston";
 import crypto from 'crypto';
-import {Color, Type, UnoCard, Value} from "./dto/card";
+import {Color, matchCard, Type, UnoCard, Value} from "./dto/card";
 import {UnoRoom} from "./dto/room";
 import {Socket} from "socket.io/dist/socket";
 import _ from "lodash";
+import {Server} from "socket.io";
 
 const logger = winston.createLogger({
     level: 'debug',
@@ -47,11 +48,11 @@ class UnoGame {
         return UnoGame.instance;
     }
 
-    debugIt = (message: any, socket: Socket, server: any, data: any) => {
+    debugIt = (message: any, socket: Socket, server: Server, data: any) => {
         logger.debug("", this._room);
     }
 
-    joinRoom = (message: any, socket: Socket, server: any, data: any) => {
+    joinRoom = (message: any, socket: Socket, server: Server, data: any) => {
         let player = this._room.players.find(p => p.name === message.name);
 
         if (player) {
@@ -60,7 +61,7 @@ class UnoGame {
             } catch (e) {
             }
 
-            if(this._room.gameState.currentPlayerId === player.id) {
+            if (this._room.gameState.currentPlayerId === player.id) {
                 this._room.gameState.currentPlayerId = socket.id;
             }
 
@@ -92,7 +93,8 @@ class UnoGame {
                 isReady: false,
                 isTurn: false,
                 isUno: false,
-                isSpectator: false
+                isSpectator: false,
+                needsToBuy: 0
             };
 
             this._room.players.push(player);
@@ -110,14 +112,15 @@ class UnoGame {
                     isReady: p.isReady,
                     isTurn: p.isTurn,
                     isUno: p.isUno,
-                    isSpectator: p.isSpectator
+                    isSpectator: p.isSpectator,
+                    needsToBuy: p.needsToBuy
                 };
             })
         });
         logger.info(`${player.name} joined the room`);
     }
 
-    leaveRoom = (message: any, socket: Socket, server: any, data: any) => {
+    leaveRoom = (message: any, socket: Socket, server: Server, data: any) => {
         const player = this._room.players.find(p => p.id === socket.id);
         if (!player) {
             logger.info(`[${socket.id}] Player not found in room`);
@@ -130,7 +133,7 @@ class UnoGame {
         logger.info(`${player.name} left the room`);
     }
 
-    playCard = (message: any, socket: Socket, server: any, data: any) => {
+    playCard = (message: any, socket: Socket, server: Server, data: any) => {
         const card = message.card as UnoCard;
 
         if (!this._room.gameState.currentPlayerId) {
@@ -156,7 +159,7 @@ class UnoGame {
             return;
         }
 
-        if (currentPlayer!.hand.find(c => _.isEqual(c, card)) === undefined) {
+        if (currentPlayer!.hand.find(c => matchCard(c, card)) === undefined) {
             logger.error(`[${socket.id}] Trying to play a card that is not in the hand.`);
             socket.emit('error', 'This is not a valid card to the current user');
             return;
@@ -176,12 +179,14 @@ class UnoGame {
 
         this._room.gameState.discardPile.push(card);
 
-        currentPlayer!.hand = currentPlayer!.hand.filter(c => !_.isEqual(c, card));
+        const cardIndex = currentPlayer!.hand.findIndex(c => matchCard(c, card));
+        if (cardIndex !== -1) {
+            currentPlayer!.hand.splice(cardIndex, 1);
+        }
+
         currentPlayer!.isTurn = false;
         logger.debug(`currentPlayer is [${JSON.stringify(currentPlayer)}]`);
 
-        //TODO: APPLY CARD EFFECTS
-        // BEGIN GAME LOGIC
         switch (card.value) {
             case Value.Reverse:
                 this._room.gameState.direction.value *= -1;
@@ -191,16 +196,15 @@ class UnoGame {
                 this._goToNextPlayer(1);
                 break;
             case Value.DrawTwo:
-                //TODO: Must inform somehow that next user needs to buy two
                 this._goToNextPlayer();
+                this._drawIntention(2);
                 break;
             case Value.Wild:
-                //TODO: Must inform somehow that next user the choosen colour
                 this._goToNextPlayer();
                 break;
             case Value.WildDrawFour:
-                //TODO: Must inform somehow that next user needs to buy four
                 this._goToNextPlayer();
+                this._drawIntention(4);
                 break;
             default:
                 this._goToNextPlayer();
@@ -212,34 +216,46 @@ class UnoGame {
         this._informPlayersCount(server);
     }
 
-    drawCard = (message: any, socket: Socket, server: any, data: any) => {
-        if (!this._isCurrentPlayerPlaying(socket.id)) {
+    nextTurn = (message: any, socket: Socket, server: Server, data: any) => {
+        this._goToNextPlayer();
+        server.to(this._room.roomId).emit('gameUpdate', {...this._room.gameState, deck: []});
+        this._informPlayersCount(server);
+    }
+
+    drawCard = (message: any, socket: Socket, server: Server, data: any) => {
+        let currentPlayer = this._room.players.find(p => p.id === socket.id);
+
+        if (!currentPlayer) {
+            logger.debug(`Player with id [${socket.id}] not found`);
             return;
         }
 
-        let currentPlayer = this._room.players.find(p => p.id === this._room.gameState.currentPlayerId!);
         const count = message.count || 1;
 
         logger.debug(`[${socket.id}] Drawing ${count} card(s)`);
 
         for (let i = 0; i < count; i++) {
             const card = this._room.gameState.deck.pop()!;
-            currentPlayer!.hand.push(card!);
+            currentPlayer.hand.push(card!);
         }
 
-        if (currentPlayer!.isUno) {
-            currentPlayer!.isUno = false;
+        if (currentPlayer.isUno) {
+            currentPlayer.isUno = false;
             this._room.gameState.isUnoCall = false;
         }
 
-        //TODO: Add validation in case want to draw until find a valid card to play
+        if (currentPlayer.needsToBuy > 0) {
+            currentPlayer.needsToBuy = Math.max(0, currentPlayer.needsToBuy - count);
+        }
 
-        socket.emit('cardDrawn', currentPlayer!.hand);
+        this._room.players = this._room.players.map(p => p.id === currentPlayer?.id ? currentPlayer : p);
+
+        socket.emit('cardDrawn', currentPlayer.hand);
         server.to(this._room.roomId).emit('gameUpdate', {...this._room.gameState, deck: []});
         this._informPlayersCount(server);
     }
 
-    callUno = (message: any, socket: Socket, server: any, data: any) => {
+    callUno = (message: any, socket: Socket, server: Server, data: any) => {
         if (!this._isCurrentPlayerPlaying(socket.id)) {
             return;
         }
@@ -248,11 +264,23 @@ class UnoGame {
             ...p,
             isUno: true
         } : p);
-        this._room.gameState.isUnoCall = true;
-        server.to(this._room.roomId).emit('unoCalled', {...this._room.gameState, deck: []});
+        server.to(this._room.roomId).emit('gameUpdate', {...this._room.gameState, deck: []});
+        this._informPlayersCount(server);
+        // this._room.gameState.isUnoCall = true;
+        // server.to(this._room.roomId).emit('unoCalled', {...this._room.gameState, deck: []});
     }
 
-    startGame = (message: any, socket: Socket, server: any, data: any) => {
+    missedUno = (message: any, socket: Socket, server: Server, data: any) => {
+        const unoMissing = this._room.players.find(p => p.hand.length === 1 && p.isUno == false && p.isTurn == false);
+        if (unoMissing) {
+            const socket = server.sockets.sockets.get(unoMissing.id);
+            if (socket) {
+                this.drawCard({count: 2}, socket, server, data);
+            }
+        }
+    }
+
+    startGame = (message: any, socket: Socket, server: Server, data: any) => {
         let cards = this._shuffleDeck(this._createUnoDeck());
 
         this._room.players.forEach(p => {
@@ -277,13 +305,16 @@ class UnoGame {
             isUnoCall: false
         };
 
-        this._room.players = this._room.players.map(p => p.id === this._room.gameState.currentPlayerId ? {...p, isTurn: true} : p);
+        this._room.players = this._room.players.map(p => p.id === this._room.gameState.currentPlayerId ? {
+            ...p,
+            isTurn: true
+        } : p);
 
         server.to(this._room.roomId).emit('gameStarted', {...this._room.gameState, deck: []});
         this._informPlayersCount(server);
     }
 
-    endGame = (message: any, socket: Socket, server: any, data: any) => {
+    endGame = (message: any, socket: Socket, server: Server, data: any) => {
         this._room.gameState = {
             deck: [],
             discardPile: [],
@@ -296,9 +327,10 @@ class UnoGame {
             isUnoCall: false
         };
         server.to(this._room.roomId).emit('gameEnded', {...this._room.gameState, deck: []});
+        server.sockets.disconnectSockets(true);
     }
 
-    shuffleDeck = (message: any, socket: Socket, server: any, data: any) => {
+    shuffleDeck = (message: any, socket: Socket, server: Server, data: any) => {
         this._room.gameState.deck = this._shuffleDeck(this._createUnoDeck());
         server.to(this._room.roomId).emit('deckShuffled', this._room.gameState.deck);
     }
@@ -321,11 +353,17 @@ class UnoGame {
                 isReady: false,
                 isTurn: false,
                 isUno: false,
-                isSpectator: false
+                isSpectator: false,
+                needsToBuy: 0
             };
 
             this._room.players.push(player);
         }
+    }
+
+    manualEndGame(server: Server) {
+        // @ts-ignore
+        this.endGame({}, {id: 'fake'}, server, {});
     }
 
     private _createUnoDeck = (): UnoCard[] => {
@@ -382,14 +420,16 @@ class UnoGame {
 
     private _goToNextPlayer = (step: number = 0) => {
         let currentPlayer = this._room.players.find(p => p.id === this._room.gameState.currentPlayerId!);
-        let nextPlayer = this._room.players[(this._room.players.indexOf(currentPlayer!) + this._room.gameState.direction.value + step) % this._room.players.length]
+        let nextPlayerIndex = (this._room.players.indexOf(currentPlayer!) + this._room.gameState.direction.value + step + this._room.players.length) % this._room.players.length;
+        let nextPlayer = this._room.players[nextPlayerIndex];
         nextPlayer.isTurn = true;
+        this._room.players = this._room.players.map(p => p.id === nextPlayer.id ? nextPlayer : {...p, isTurn: false});
 
         this._room.gameState.currentPlayerId = nextPlayer.id;
         return nextPlayer;
     }
 
-    private _informPlayersCount = (server: any) => {
+    private _informPlayersCount = (server: Server) => {
         server.to(this._room.roomId).emit('playersCountUpdate', this._room.players.map(p => {
             return {
                 id: p.id,
@@ -399,7 +439,8 @@ class UnoGame {
                 isReady: p.isReady,
                 isTurn: p.isTurn,
                 isUno: p.isUno,
-                isSpectator: p.isSpectator
+                isSpectator: p.isSpectator,
+                needsToBuy: p.needsToBuy
             };
         }));
     }
@@ -434,6 +475,32 @@ class UnoGame {
         }
 
         return room;
+    }
+
+    private _drawIntention = (drawNumber: number) => {
+        let count = drawNumber;
+
+        this._room.players.forEach(p => {
+            count += p.needsToBuy;
+        });
+
+        // const discardPile = this._room.gameState.discardPile;
+
+        // for (let i = discardPile.length - 1; i >= 0; i--) {
+        //     if (discardPile[i].value.toLowerCase().indexOf('draw') === -1) {
+        //         break;
+        //     }
+        //
+        //     if (discardPile[i].value.toLowerCase().indexOf('four') > -1) {
+        //         count += 4;
+        //     } else if (discardPile[i].value.toLowerCase().indexOf('two') > -1) {
+        //         count += 2;
+        //     }
+        // }
+
+        this._room.players = this._room.players.map(p => {
+            return {...p, needsToBuy: p.id === this._room.gameState.currentPlayerId ? count : 0};
+        });
     }
 }
 

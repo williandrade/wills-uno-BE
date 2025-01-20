@@ -29,10 +29,21 @@ enum Type {
     Wild,
     WildDrawFour,
 }
+
 interface UnoCard {
     color: Color | null; // 'null' for wild cards
     value: Value;
     type: Type;
 }
 
-export { UnoCard, Color, Value, Type };
+function matchCard(card: UnoCard, other: UnoCard): boolean {
+    if(card.type === Type.Wild || card.type === Type.WildDrawFour) {
+        return card.type === other.type && card.value === other.value;
+    }
+
+    return card.color === other.color &&
+        card.value === other.value &&
+        card.type === other.type;
+}
+
+export {UnoCard, Color, Value, Type, matchCard};

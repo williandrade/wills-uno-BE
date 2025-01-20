@@ -17,6 +17,7 @@ interface Player {
     isReady: boolean; // True if the player is ready to start the game
     isTurn: boolean; // True if it's the player's turn
     isUno: boolean; // True if the player has called UNO
+    needsToBuy: number; // Number of cards the player needs to buy
     isSpectator: boolean; // True if the player is just spectating
 }
 
